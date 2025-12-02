@@ -15,32 +15,7 @@
 
 ## 2. 使用方式
 
-### 2.1 Notebook 使用流程（推荐）
-
-1. 启动 Notebook：  
-   ```bash
-   jupyter notebook EBR_workflow.ipynb
-   ```
-2. 阅读前两格 Markdown，确认流程说明。  
-3. 在“配置”代码单元中按需修改：
-   - `FINETUNE_CONFIG`: 训练数据路径、LoRA 参数、batch size 等。
-   - `INFERENCE_CONFIG`: 推理模型路径、输入 CSV 目录、输出文件等。
-   - `VIS_CONFIG`: 可视化所需的嵌入文件、标签列名、t-SNE/UMAP 参数等。
-4. 设置底部的运行开关：
-   ```python
-   RUN_FINETUNE = True
-   RUN_INFERENCE = True
-   RUN_VISUALIZATION = True
-   ```
-   只执行需要的阶段，耗时/耗资源的步骤可保持 `False`。
-5. 依次运行全部单元或只运行相关部分：
-   - `RUN_FINETUNE` 为 True 时，会调用 `train_sentence_transformer` 完成 LoRA 微调并将模型保存到 `./saved_model/<model>-peft-lora/`。
-   - `RUN_INFERENCE` 为 True 时，`run_batch_inference` 会遍历 `infer_data` 下的 CSV，按 `description_column` 取文本、批量编码并将结果写入 `./faiss/embeds_2.txt`（或你指定的位置）。
-   - `RUN_VISUALIZATION` 为 True 时，`visualize_embeddings` 会读取嵌入文件，计算 t-SNE/UMAP 降维结果及聚类指标，并生成 `./embedding_scatter.png`。
-
-### 2.2 命令行脚本使用
-
-也可以直接使用 `ebr_finetune.py` 进行微调：
+直接使用 `ebr_finetune.py` 进行微调：
 
 ```bash
 python ebr_finetune.py \
