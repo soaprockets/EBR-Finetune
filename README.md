@@ -1,7 +1,5 @@
 # EBR Fine-tune / Inference / Visualization 指南
 
-本仓库已经将微调、批量推理与向量降维可视化集中在 `EBR_workflow.ipynb` Notebook 中。该文件整合了原来的 `ebr_finetune.py`、`ebr_infer.py` 与 `ebr_dim_reduction_vis.py`，可以按需开启/关闭不同阶段。
-
 ## 1. 环境准备
 
 1. 建议使用 Python 3.10+ 虚拟环境：  
