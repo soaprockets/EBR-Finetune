@@ -161,6 +161,8 @@ def parse_args():
     # 数据配置
     parser.add_argument("--data_path", type=str, default="./train_text/", # ./train_data bge模型最佳微调数据集； ./train_text qwen最佳微调数据集
                         help="Path to training data")
+    parser.add_argument("--max_samples", type=int, default=10000,
+                        help="Maximum number of samples to load from dataset (None for all data)")
     parser.add_argument("--use_prompt", action="store_true", default=True,
                         help="Whether to add prompt to query texts")
     parser.add_argument("--prompt", type=str, default="Instruct: Retrieve semantically similar text.\nQuery:",
@@ -175,7 +177,7 @@ def parse_args():
                         help="Output directory for saving models")
     parser.add_argument("--num_epochs", type=int, default=1,
                         help="Number of training epochs")
-    parser.add_argument("--train_batch_size", type=int, default=6, #16
+    parser.add_argument("--train_batch_size", type=int, default=12, #16
                         help="Training batch size per device")
     parser.add_argument("--eval_batch_size", type=int, default=4,
                         help="Evaluation batch size per device")
@@ -183,9 +185,9 @@ def parse_args():
                         help="Learning rate")
     parser.add_argument("--weight_decay", type=float, default=0.01,
                         help="Weight decay (L2 regularization coefficient)")
-    parser.add_argument("--l1_regularization", type=float, default=0.0,
+    parser.add_argument("--l1_regularization", type=float, default=0,
                         help="L1 regularization coefficient (0.0 to disable)")
-    parser.add_argument("--max_grad_norm", type=float, default=1.0,
+    parser.add_argument("--max_grad_norm", type=float, default=0.0,
                         help="Maximum gradient norm for gradient clipping (0.0 to disable)")
     parser.add_argument("--eval_steps", type=int, default=500,
                         help="Evaluation steps")
@@ -386,6 +388,15 @@ def main():
     dataset = load_dataset('json', data_files=json_files)
     dataset = dataset.filter(lambda example: example != '')
     
+    # 限制数据集大小（如果指定）
+    if args.max_samples is not None:
+        total_samples = len(dataset['train'])
+        if total_samples > args.max_samples:
+            dataset['train'] = dataset['train'].select(range(args.max_samples))
+            print(f'⚠️  数据量限制: 从 {total_samples} 条样本中选择了前 {args.max_samples} 条')
+        else:
+            print(f'✓ 数据量: {total_samples} 条（未达到限制 {args.max_samples}）')
+    
     # 根据参数决定是否添加 prompt 到所有文本字段
     if args.use_prompt:
         print(f'为数据添加 prompt: "{args.prompt}"')
@@ -484,7 +495,7 @@ def main():
         bf16=args.bf16,
         dataloader_num_workers=args.dataloader_num_workers,
         dataloader_pin_memory=args.dataloader_pin_memory,
-        lr_scheduler_type=args.lr_scheduler_type,
+        # lr_scheduler_type=args.lr_scheduler_type,
         **lr_scheduler_kwargs
     )
     
