@@ -12,7 +12,7 @@ from sentence_transformers import (
     SentenceTransformerTrainingArguments,
 )
 from sentence_transformers.evaluation import TripletEvaluator, SimilarityFunction
-from sentence_transformers.losses import MultipleNegativesRankingLoss,MultipleNegativesSymmetricRankingLoss
+from sentence_transformers.losses import MultipleNegativesRankingLoss,MultipleNegativesSymmetricRankingLoss,TripletLoss,MegaBatchMarginLoss
 from sentence_transformers.training_args import BatchSamplers
 from peft import LoraConfig, TaskType
 from transformers import TrainerCallback
@@ -139,7 +139,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Sentence Transformer with LoRA Fine-tuning")
     
     # 模型配置
-    parser.add_argument("--model_name", type=str, default="./model/KaLM-embedding-multilingual-mini-instruct-v2.5",
+    parser.add_argument("--model_name", type=str, default="./model/bge-m3",
                         help="Pretrained model name or path")
     parser.add_argument("--trust_remote_code", action="store_true", default=True,
                         help="Whether to trust remote code when loading model")
@@ -153,19 +153,20 @@ def parse_args():
                         help="LoRA dropout rate")
     
     # Dense层配置
-    parser.add_argument("--dense_dim1", type=int, default=512,
+    parser.add_argument("--dense_dim1", type=int, default=256,
                         help="First dense layer dimension")
     parser.add_argument("--dense_dim2", type=int, default=256,
                         help="Second dense layer dimension")
     
     # 数据配置
-    parser.add_argument("--data_path", type=str, default="./train_text/", # ./train_data bge模型最佳微调数据集； ./train_text qwen最佳微调数据集
+    parser.add_argument("--data_path", type=str, default="./train_data/", # ./train_data bge模型最佳微调数据集； ./train_text qwen最佳微调数据集
                         help="Path to training data")
-    parser.add_argument("--max_samples", type=int, default=10000,
+    parser.add_argument("--max_samples", type=int, default=20000,
                         help="Maximum number of samples to load from dataset (None for all data)")
-    parser.add_argument("--use_prompt", action="store_true", default=True,
+    parser.add_argument("--use_prompt", action="store_true", default=False,
                         help="Whether to add prompt to query texts")
-    parser.add_argument("--prompt", type=str, default="Instruct: Retrieve semantically similar text.\nQuery:",
+    parser.add_argument("--prompt", type=str, default="Clustering:",
+    #"Instruct: Retrieve semantically similar text.\nQuery:",
                         help="Prompt to prepend to query texts (only used when --use_prompt is set)")
     parser.add_argument("--test_size", type=float, default=0.2,
                         help="Test split ratio")
@@ -177,23 +178,23 @@ def parse_args():
                         help="Output directory for saving models")
     parser.add_argument("--num_epochs", type=int, default=1,
                         help="Number of training epochs")
-    parser.add_argument("--train_batch_size", type=int, default=12, #16
+    parser.add_argument("--train_batch_size", type=int, default=16, #16
                         help="Training batch size per device")
     parser.add_argument("--eval_batch_size", type=int, default=4,
                         help="Evaluation batch size per device")
-    parser.add_argument("--learning_rate", type=float, default=2e-4, # 2e-4
+    parser.add_argument("--learning_rate", type=float, default=2e-5, # 2e-4
                         help="Learning rate")
-    parser.add_argument("--weight_decay", type=float, default=0.01,
+    parser.add_argument("--weight_decay", type=float, default=0.01, #没啥用
                         help="Weight decay (L2 regularization coefficient)")
-    parser.add_argument("--l1_regularization", type=float, default=0,
+    parser.add_argument("--l1_regularization", type=float, default=0.0,
                         help="L1 regularization coefficient (0.0 to disable)")
-    parser.add_argument("--max_grad_norm", type=float, default=0.0,
+    parser.add_argument("--max_grad_norm", type=float, default=1.0, # 默认配置为1
                         help="Maximum gradient norm for gradient clipping (0.0 to disable)")
     parser.add_argument("--eval_steps", type=int, default=500,
                         help="Evaluation steps")
     parser.add_argument("--save_steps", type=int, default=500,
                         help="Save steps")
-    parser.add_argument("--warmup_steps", type=int, default=300,
+    parser.add_argument("--warmup_steps", type=int, default=100, #100
                         help="Warmup steps")
     parser.add_argument("--logging_steps", type=int, default=100,
                         help="Logging steps")
@@ -205,7 +206,7 @@ def parse_args():
                         help="Early stopping patience (0 to disable, number of eval steps without improvement)")
     parser.add_argument("--early_stopping_threshold", type=float, default=0.0,
                         help="Early stopping threshold (minimum improvement to reset patience)")
-    parser.add_argument("--lr_scheduler_type", type=str, default="linear",
+    parser.add_argument("--lr_scheduler_type", type=str, default="cosine",
                         choices=["linear", "cosine", "cosine_with_restarts", "polynomial", "constant", "constant_with_warmup"],
                         help="Learning rate scheduler type")
     parser.add_argument("--lr_scheduler_kwargs", type=str, default=None,
@@ -228,10 +229,10 @@ def parse_args():
     # 噪声/数据增强配置（防止过拟合）
     parser.add_argument("--noise_enabled", action="store_true", default=False,
                         help="Whether to enable text noise augmentation (default: False, use --noise_enabled to enable)")
-    parser.add_argument("--noise_type", type=str, default="random_delete",
+    parser.add_argument("--noise_type", type=str, default="random_swap",
                         choices=["random_delete", "random_swap", "char_delete", "none"],
                         help="Type of noise to apply: random_delete, random_swap, char_delete, or none")
-    parser.add_argument("--noise_prob", type=float, default=0.1,
+    parser.add_argument("--noise_prob", type=float, default=0.5,
                         help="Probability of applying noise to each sample (0.0-1.0)")
     parser.add_argument("--noise_apply_to_fields", type=str, nargs="+", default=["anchor", "positive"],
                         help="Fields to apply noise to (default: anchor positive)")
@@ -340,20 +341,27 @@ def main():
         # truncate_dim=256
         # trust_remote_code=args.trust_remote_code
     )
+
     logging.info(base_model)
     
     # 应用 LoRA 配置
     lora_config = LoraConfig(
         task_type=TaskType.FEATURE_EXTRACTION,
-        # inference_mode=False,
+        inference_mode=False,
         r=args.lora_r,
         lora_alpha=args.lora_alpha,
         lora_dropout=args.lora_dropout,
-        bias="none",
+        # bias="none",
+        # target_modules=["query","key","value"]
         # target_modules=["Wo", "Wqkv"]
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "down_proj", "gate_proj", "up_proj"]
+        # target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "down_proj", "gate_proj", "up_proj"]
+        # target_modules=["q","k","v","o"]
+        # target_modules=["Wqkv","out_pro","fc11","fc12","fc2"]
+
     )
     base_model.add_adapter(lora_config)
+
+    print(list(base_model.modules()))
     
     # 打印可训练参数
     print_trainable_parameters(base_model)
@@ -368,17 +376,17 @@ def main():
         if not args.gradient_checkpointing:
             print('  - 可以启用 --gradient_checkpointing 来节省内存（训练会稍慢）')
     
-    # dense_layer1 = models.Dense(
-    #     in_features=base_model.get_sentence_embedding_dimension(),
-    #     out_features=args.dense_dim1,
-    #     activation_function=nn.SiLU())
+    dense_layer1 = models.Dense(
+        in_features=base_model.get_sentence_embedding_dimension(),
+        out_features=args.dense_dim1,
+        activation_function=nn.GELU())
     # dense_layer2 = models.Dense(
         # in_features=base_model.get_sentence_embedding_dimension(),
         # out_features=args.dense_dim2,
         # activation_function=nn.GELU())
-    # model = SentenceTransformer(modules=[base_model,dense_layer2])
+    model = SentenceTransformer(modules=[base_model,dense_layer1])
 
-    model = base_model
+    # model = base_model
     
     model_name_only = args.model_name.split('/')[-1]
     print(f'模型加载完成')
@@ -433,27 +441,22 @@ def main():
         if hasattr(base_model, 'enable_input_require_grads'):
             base_model.enable_input_require_grads()
         if hasattr(base_model[0], 'gradient_checkpointing_enable'):
-            base_model[0].gradient_checkpointing_enable()
             print('已启用梯度检查点 (Gradient Checkpointing) 以节省内存')
     
-    # 创建基础 loss
-    base_loss = MultipleNegativesSymmetricRankingLoss(model)
     
+    base_loss = MultipleNegativesRankingLoss(model)
     # 应用 L1 正则化（如果启用）
     # 创建基础 loss
     if args.l1_regularization > 0:
         # 定义一个工厂函数，接收 model 参数并返回 RegularizedLoss 实例
-        def create_loss(model):
-            base_loss = MultipleNegativesSymmetricRankingLoss(model)
-            return RegularizedLoss(base_loss, model, args.l1_regularization)
-        loss = create_loss  # 注意：这里传递的是函数，不是实例
+        loss = RegularizedLoss(base_loss, model, args.l1_regularization)  # 注意：这里传递的是函数，不是实例
         print(f'✓ 已启用 L1 正则化: coefficient = {args.l1_regularization}')
     else:
-        loss = MultipleNegativesSymmetricRankingLoss  # 传递类本身，不是实例
+        loss = base_loss  # 传递类本身，不是实例
     
     # 打印正则化配置
     print(f'\n正则化配置:')
-    print(f'  - Weight Decay (L2): {args.weight_decay}')
+    print(f'  - Weight Decay (L2):{args.weight_decay if args.weight_decay else "禁用"}')
     print(f'  - L1 Regularization: {args.l1_regularization if args.l1_regularization > 0 else "禁用"}')
     print(f'  - LoRA Dropout: {args.lora_dropout}')
     print(f'  - Max Grad Norm: {args.max_grad_norm if args.max_grad_norm > 0 else "禁用"}')
@@ -480,7 +483,7 @@ def main():
         per_device_eval_batch_size=args.eval_batch_size,
         learning_rate=args.learning_rate,
         weight_decay=args.weight_decay,
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        # gradient_accumulation_steps=args.gradient_accumulation_steps,
         max_grad_norm=args.max_grad_norm if args.max_grad_norm > 0 else None,
         batch_sampler=BatchSamplers.NO_DUPLICATES,
         eval_strategy="steps",
@@ -493,8 +496,8 @@ def main():
         logging_dir=os.path.join(args.output_dir, run_name),
         fp16=args.fp16,
         bf16=args.bf16,
-        dataloader_num_workers=args.dataloader_num_workers,
-        dataloader_pin_memory=args.dataloader_pin_memory,
+        # dataloader_num_workers=args.dataloader_num_workers,
+        # dataloader_pin_memory=args.dataloader_pin_memory,
         # lr_scheduler_type=args.lr_scheduler_type,
         **lr_scheduler_kwargs
     )
@@ -502,7 +505,7 @@ def main():
     dev_evaluator = TripletEvaluator(
         anchors=eval_dataset["anchor"],
         positives=eval_dataset["positive"],
-        negatives=generate_negative(eval_dataset),
+        negatives=generate_negative(eval_dataset), #generate_negative(eval_dataset)
         main_similarity_function=SimilarityFunction.COSINE,
         name="sts-dev"
     )
